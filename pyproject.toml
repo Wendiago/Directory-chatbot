@@ -1,0 +1,41 @@
+[project]
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "ollama>=0.1.7",
+    "requests>=2.31.0",
+    "PyPDF2>=3.0.0",
+    "python-docx>=1.1.0",
+    "python-pptx>=0.6.23",
+    "sentence-transformers>=2.2.0",
+    "chromadb>=0.4.0",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "scikit-learn>=1.3.0",
+    "streamlit>=1.28.0",
+    "mcp>=1.3.0",
+    "websockets>=11.0.0",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "loguru>=0.7.0",
+    "tqdm>=4.66.0",
+    "aiofiles>=23.0.0",
+    "langchain>=0.1.0",
+    "langchain-community>=0.0.10",
+    "black>=23.0.0",
+    "tiktoken>=0.5.0",
+]
+name = "chatbot"
+version = "0.1.0"
+description = "A local chatbot using FastAPI and Ollama to search file in local directory"
+authors = [{ name = "wendiago", email = "phungngoctqk@gmail.com" }]
+readme = "README.md"
+requires-python = ">=3.10,<4.0"
+
+[tool.poetry]
+packages = [{ include = "chatbot", from = "src" }]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
