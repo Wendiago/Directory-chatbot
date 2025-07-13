@@ -1,0 +1,25 @@
+# Core project dependencies
+python-dotenv
+mcp[cli]
+colorama
+requests
+streamlit
+black
+fastmcp
+
+# Document processing
+PyPDF2
+pandas
+openpyxl
+python-pptx
+python-docx
+Pillow
+eyed3
+
+# Semantic search and ML
+sentence-transformers
+scikit-learn
+numpy
+
+# Filesystem tools
+pathspec
