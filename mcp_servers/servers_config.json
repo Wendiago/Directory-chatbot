@@ -1,14 +1,5 @@
 {
   "mcpServers": {
-    "markdown_processor": {
-      "command": "C:\\Users\\LTC\\.local\\bin\\uv.exe",
-      "args": [
-        "--directory",
-        "E:\\HoangNgoc\\NewTechInSE\\chatbot\\mcp_servers",
-        "run",
-        "markdown_processor.py"
-      ]
-    },
     "file_system": {
       "command": "C:\\Users\\LTC\\.local\\bin\\uv.exe",
       "args": [
@@ -16,8 +7,7 @@
         "E:\\HoangNgoc\\NewTechInSE\\chatbot\\mcp_servers",
         "run",
         "file_system.py",
-        "E:\\HoangNgoc\\NewTechInSE\\project3\\data",
-        "--rebuild-index"
+        "E:\\HoangNgoc\\NewTechInSE\\project3\\data"
       ]
     }
   }
