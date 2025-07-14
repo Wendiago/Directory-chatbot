@@ -35,6 +35,15 @@ import pickle
 
 from mcp.server.fastmcp import FastMCP
 
+
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
 # Configuration constants
 DEFAULT_IGNORE_PATTERNS = [
     ".git",
@@ -58,6 +67,39 @@ DEFAULT_IGNORE_PATTERNS = [
     "*.tmp",
     "*.cache",
 ]
+
+# extensions constants
+SUPPORTED_EXTENSIONS = {
+    '.pdf', '.docx', '.doc', '.xlsx', '.xls', '.csv',
+    '.pptx', '.ppt', '.txt', '.md', '.py', '.js',
+    '.html', '.css', '.json', '.xml', '.yaml', '.yml'
+}
+
+# category constants
+CATEGORIES = [
+                "tài chính",
+                "kế toán", 
+                "marketing",
+                "nhân sự",
+                "pháp lý",
+                "kỹ thuật",
+                "báo cáo",
+                "kế hoạch",
+                "hợp đồng",
+                "đào tạo",
+                "bán hàng",
+                "sản phẩm",
+                "dự án",
+                "chính sách",
+                "thống kê",
+                "nghiên cứu",
+                "vận hành",
+                "quản trị",
+                "khác",
+                "không có nội dụng"
+]
+
+CLASSIFICATION_MIN_SCORE_THRESHOLD = 0.3
 
 @dataclass
 class FileMetadata:
@@ -314,6 +356,9 @@ class SemanticSearchEngine:
     
     def add_document(self, file_path: str, content: str, metadata: Dict[str, Any]):
         """Add document to search index"""
+        if not content or not isinstance(content, str):
+            print(f"Invalid content for embedding: {file_path}")
+            return
         self.file_contents[file_path] = {
             "content": content,
             "metadata": metadata,
@@ -358,13 +403,14 @@ class SemanticSearchEngine:
                 self.embeddings_cache = data.get("embeddings_cache", {})
                 self.file_contents = data.get("file_contents", {})
         except Exception as e:
-            print(f"Warning: Could not load search index: {e}")
+            logger.warning(f"Failed to load index, rebuilding instead: {e}")
+            
 
 # Create MCP instance  
 mcp = FastMCP("Semantic Filesystem Server 🧠")
 
 class FilesystemServer:
-    def __init__(self, root_path: str, custom_ignore_patterns: Optional[List[str]] = None):
+    def __init__(self, root_path: str, custom_ignore_patterns: Optional[List[str]] = None, rebuild_index: bool = False):
         """Initialize the semantic filesystem server"""
         self.root_path = os.path.abspath(root_path)
         if not os.path.exists(self.root_path):
@@ -387,17 +433,20 @@ class FilesystemServer:
         self.extractor = DocumentExtractor()
         self.search_engine = SemanticSearchEngine()
         
-        # Load existing search index
+        # Search index path
         index_path = os.path.join(self.root_path, ".semantic_index.pkl")
-        self.search_engine.load_index(index_path)
         
         # Register tools, resources, and prompts
         self._register_tools()
         self._register_resources()
         self._register_prompts()
         
-        # Build initial index
-        self._build_search_index()
+        # Build initial index, only build index when there is change
+        if rebuild_index and self._should_rebuild_index():
+            self._build_search_index()
+            self.search_engine.load_index(index_path)
+        else:
+            self.search_engine.load_index(index_path)
     
     def _is_safe_path(self, path: str) -> bool:
         """Check if a path is safe to access"""
@@ -467,12 +516,7 @@ class FilesystemServer:
     def _is_extractable(self, file_path: str, mime_type: str) -> bool:
         """Check if content can be extracted from file"""
         ext = os.path.splitext(file_path)[1].lower()
-        extractable_extensions = [
-            '.pdf', '.docx', '.doc', '.xlsx', '.xls', '.csv',
-            '.pptx', '.ppt', '.txt', '.md', '.py', '.js',
-            '.html', '.css', '.json', '.xml', '.yaml', '.yml'
-        ]
-        return ext in extractable_extensions
+        return ext in SUPPORTED_EXTENSIONS
     
     def _extract_content(self, file_path: str) -> Optional[DocumentContent]:
         """Extract content from various file types"""
@@ -500,11 +544,39 @@ class FilesystemServer:
             else:
                 return None
         except Exception as e:
+            logger.exception(f"Failed to extract content from {file_path}: {e}")
             return DocumentContent(text=f"Error extracting content: {str(e)}", metadata={})
+        
+    def _should_rebuild_index(self):
+        index_path = Path(self.root_path) / ".semantic_index.pkl"
+        if not index_path.exists():
+            logger.info("Index file not found — will rebuild index.")
+            return True
+
+        index_mtime = index_path.stat().st_mtime
+
+        for root, _, files in os.walk(self.root_path):
+            for file in files:
+                full_path = Path(root) / file
+                if (
+                    not self._is_ignored(str(full_path)) and 
+                    full_path.suffix.lower() in SUPPORTED_EXTENSIONS and 
+                    full_path.stat().st_mtime > index_mtime
+                ):
+                    logger.info(f"{full_path} was modified after index — will rebuild index.")
+                    return True
+
+        logger.info("Index is up-to-date — skipping rebuild.")
+        return False
     
     def _build_search_index(self):
         """Build semantic search index for all files"""
-        print("Building semantic search index...")
+        logger.info("Building semantic search index...")
+        
+        indexed_count = 0
+        skipped_ignored = 0
+        skipped_unextractable = 0
+        failed = 0
         
         for root, dirs, files in os.walk(self.root_path):
             dirs[:] = [d for d in dirs if not self._is_ignored(os.path.join(root, d))]
@@ -513,28 +585,45 @@ class FilesystemServer:
                 full_path = os.path.join(root, file)
                 
                 if self._is_ignored(full_path):
+                    logger.debug(f"Skipped (ignored): {full_path}")
+                    skipped_ignored += 1
                     continue
                 
                 metadata = self._get_file_metadata(full_path)
                 if not metadata or not metadata.extractable:
+                    logger.debug(f"Skipped (unextractable): {full_path}")
+                    skipped_unextractable += 1
                     continue
                 
-                content = self._extract_content(full_path)
-                if content and content.text:
-                    rel_path = os.path.relpath(full_path, self.root_path)
-                    self.search_engine.add_document(
-                        rel_path,
-                        content.text,
-                        {
-                            "file_metadata": metadata.__dict__,
-                            "content_metadata": content.metadata
-                        }
-                    )
+                try: 
+                    content = self._extract_content(full_path)
+                    if content and content.text:
+                        rel_path = os.path.relpath(full_path, self.root_path)
+                        self.search_engine.add_document(
+                            rel_path,
+                            content.text,
+                            {
+                                "file_metadata": metadata.__dict__,
+                                "content_metadata": content.metadata
+                            }
+                        )
+                        logger.info(f"Indexed: {rel_path}")
+                        indexed_count += 1
+                    else:
+                        logger.warning(f"Skipped (empty/error content): {full_path}")
+                except Exception as e:
+                    logger.exception(f"Failed to index {full_path}")
+                    failed += 1
         
         # Save index
         index_path = os.path.join(self.root_path, ".semantic_index.pkl")
         self.search_engine.save_index(index_path)
-        print("Semantic search index built successfully!")
+        
+        logger.info("Semantic search indexing complete.")
+        logger.info(f"Indexed: {indexed_count}")
+        logger.info(f"Ignored by .ignore: {skipped_ignored}")
+        logger.info(f"Unextractable: {skipped_unextractable}")
+        logger.info(f"Failed: {failed}")
         
     def _extract_snippet(self, text: str, query: str, context_size: int = 100) -> str:
         """Extract a snippet around the query match"""
@@ -556,69 +645,175 @@ class FilesystemServer:
         
         return snippet
     
-    def _register_tools(self):
-        """Register all tools"""
+    def debug_search_engine(self):
+        """Debug the search engine state"""
+        logger.info(f"Search engine state:")
+        logger.info(f"  - File contents: {len(self.search_engine.file_contents)} documents")
+        logger.info(f"  - Embeddings cache: {len(self.search_engine.embeddings_cache)} entries")
+        
+        # Check if any file handles are left open
+        import gc
+        import sys
+        
+        file_objects = [obj for obj in gc.get_objects() if hasattr(obj, 'read') and hasattr(obj, 'close')]
+        logger.info(f"  - Open file objects: {len(file_objects)}")
+        
+        for i, fobj in enumerate(file_objects[:5]):  # Show first 5
+            try:
+                logger.info(f"    {i}: {fobj.name if hasattr(fobj, 'name') else 'unknown'}")
+            except:
+                pass
     
+    def _register_tools(self):
+        """Register all tools"""    
         @mcp.tool()
-        def semantic_search(
+        def search_files(
             query: str,
-            top_k: int = 10,
-            similarity_threshold: float = 0.5,
-            file_types: Optional[List[str]] = None,
-            include_content: bool = True
+            search_type: str = "hybrid",
+            path: str = "",
+            file_extensions: Optional[List[str]] = None,
+            modified_after: Optional[str] = None,
+            modified_before: Optional[str] = None,
+            max_results: int = 20
         ) -> Dict[str, Any]:
             """
-            Perform semantic search across all indexed documents.
-            
+            Search for files using various methods.
+
+            Supports:
+            - Filename search (exact match or contains for filename only)
+            - Content search (exact substring match in file body)
+            - Semantic search (embedding-based conceptual match)
+            - Hybrid search (combined filename, content, and semantic, should be prioritized)
+
             Args:
-                query: Natural language search query
-                top_k: Maximum number of results to return
-                similarity_threshold: Minimum similarity score (0-1)
-                file_types: Filter by file types (e.g., ['pdf', 'docx'])
-                include_content: Whether to include content snippets
-            
+                query (required): Search query (filename, content), can be set to "" to match all files
+                search_type (default to hybrid): Type of search (filename, content, semantic, hybrid)
+                path: Limit search to specific path
+                file_extensions: Filter by file extensions
+                modified_after: ISO format date string
+                modified_before: ISO format date string
+                max_results (default to 20): Maximum number of results
+
             Returns:
-                Dictionary with semantic search results
+                Dictionary with search results
             """
-            results = self.search_engine.search(query, top_k, similarity_threshold)
+            if not self._is_safe_path(path):
+                return {"error": "Path is outside root directory"}
             
-            # Filter by file types if specified
-            if file_types:
-                file_types = [ft.lower() for ft in file_types]
-                results = [r for r in results if any(r['file_path'].lower().endswith(ft) for ft in file_types)]
-            
-            # Format results
-            formatted_results = []
-            for result in results:
-                formatted_result = {
-                    "file_path": result["file_path"],
-                    "similarity_score": result["similarity"],
-                    "file_metadata": result["metadata"].get("file_metadata", {}),
-                    "content_metadata": result["metadata"].get("content_metadata", {})
+            # Normalize file extensions to include .
+            file_extensions = [ext if ext.startswith('.') else f'.{ext}' for ext in file_extensions] if file_extensions else None
+            search_path = os.path.join(self.root_path, path)
+            results = []
+
+            try:
+                # Parse date filters
+                after_date = datetime.fromisoformat(modified_after) if modified_after else None
+                before_date = datetime.fromisoformat(modified_before) if modified_before else None
+
+                if search_type in ["filename", "hybrid"]:
+                    for root, dirs, files in os.walk(search_path):
+                        dirs[:] = [d for d in dirs if not self._is_ignored(os.path.join(root, d))]
+                        for file in files:
+                            full_path = os.path.join(root, file)
+                            if self._is_ignored(full_path):
+                                continue
+                            if file_extensions and not any(file.lower().endswith(ext.lower()) for ext in file_extensions):
+                                continue
+
+                            metadata = self._get_file_metadata(full_path)
+                            if not metadata:
+                                continue
+                            if after_date and metadata.modified < after_date:
+                                continue
+                            if before_date and metadata.modified > before_date:
+                                continue
+
+                            if not query or query.lower() in file.lower():
+                                results.append({
+                                    "file_path": metadata.path,
+                                    "match_type": "filename",
+                                    "match_score": 1.0,
+                                    "metadata": metadata.__dict__
+                                })
+
+                if search_type in ["content", "hybrid"]:
+                    for root, dirs, files in os.walk(search_path):
+                        dirs[:] = [d for d in dirs if not self._is_ignored(os.path.join(root, d))]
+                        for file in files:
+                            full_path = os.path.join(root, file)
+                            if self._is_ignored(full_path):
+                                continue
+                            if file_extensions and not any(file.lower().endswith(ext.lower()) for ext in file_extensions):
+                                continue
+
+                            metadata = self._get_file_metadata(full_path)
+                            if not metadata or not metadata.extractable:
+                                continue
+                            if after_date and metadata.modified < after_date:
+                                continue
+                            if before_date and metadata.modified > before_date:
+                                continue
+
+                            content = self._extract_content(full_path)
+                            if content and (not query or query.lower() in content.text.lower()):
+                                results.append({
+                                    "file_path": metadata.path,
+                                    "match_type": "content",
+                                    "match_score": 0.8,
+                                    "metadata": metadata.__dict__,
+                                    "content_snippet": self._extract_snippet(content.text, query)
+                                })
+
+                if search_type in ["semantic", "hybrid"] and query:
+                    semantic_results = self.search_engine.search(query, max_results, 0.5)
+
+                    for result in semantic_results:
+                        file_path = result["file_path"]
+                        full_path = os.path.join(self.root_path, file_path)
+
+                        if file_extensions and not any(file_path.lower().endswith(ext.lower()) for ext in file_extensions):
+                            continue
+
+                        metadata = self._get_file_metadata(full_path)
+                        if not metadata:
+                            continue
+                        if after_date and metadata.modified < after_date:
+                            continue
+                        if before_date and metadata.modified > before_date:
+                            continue
+
+                        results.append({
+                            "file_path": file_path,
+                            "match_type": "semantic",
+                            "match_score": result["similarity"],
+                            "metadata": metadata.__dict__,
+                            "content_snippet": self._extract_snippet(result["content"], query)
+                        })
+
+                # Deduplicate and sort by score
+                seen_paths = set()
+                unique_results = []
+                for result in results:
+                    if result["file_path"] not in seen_paths:
+                        seen_paths.add(result["file_path"])
+                        unique_results.append(result)
+
+                unique_results.sort(key=lambda x: x["match_score"], reverse=True)
+
+                logger.info(f"Search completed: {query} | Found: {len(unique_results)} files")
+
+                return {
+                    "query": query,
+                    "search_type": search_type,
+                    "results": unique_results[:max_results],
+                    "total_results": len(unique_results)
                 }
+
+            except Exception as e:
+                logger.exception(f"Search failed for query '{query}'")
+                return {"error": f"Search failed: {str(e)}"}
+
                 
-                if include_content:
-                    # Extract relevant snippets
-                    content = result["content"]
-                    sentences = content.split('.')
-                    query_words = query.lower().split()
-                    
-                    relevant_snippets = []
-                    for sentence in sentences[:50]:  # Limit to first 50 sentences
-                        if any(word in sentence.lower() for word in query_words):
-                            relevant_snippets.append(sentence.strip())
-                    
-                    formatted_result["content_snippets"] = relevant_snippets[:5]  # Top 5 snippets
-                
-                formatted_results.append(formatted_result)
-            
-            return {
-                "query": query,
-                "results": formatted_results,
-                "total_results": len(formatted_results),
-                "search_type": "semantic"
-            }
-        
         @mcp.tool()
         def extract_document_content(
             path: str,
@@ -671,6 +866,111 @@ class FilesystemServer:
                     result["slides"] = content.slides
             
             return result
+        
+        @mcp.tool()
+        def classify_files(
+            file_paths: List[str],
+        ) -> Dict[str, Any]:
+            """
+            Classify files into categories based on content and metadata. Categories are already predefined.
+            
+            Args:
+                file_paths: List of file paths to classify
+            
+            Returns:
+                Dictionary with classification results
+            """
+               
+            results = []
+            category_embeddings = {}
+            
+            try:
+                # Generate embeddings for categories
+                for category in CATEGORIES:
+                    category_embeddings[category] = self.search_engine.get_embedding(category)
+                
+                for file_path in file_paths:
+                    filename = os.path.basename(file_path)
+                    if not self._is_safe_path(file_path):
+                        results.append({
+                            "filename": filename,
+                            "file_path": file_path,
+                            "error": "Path is outside root directory"
+                        })
+                        continue
+                    
+                    full_path = os.path.join(self.root_path, file_path)
+                    
+                    if not os.path.exists(full_path):
+                        results.append({
+                            "filename": filename,
+                            "file_path": file_path,
+                            "error": "File not found"
+                        })
+                        continue
+                    
+                    # Get file metadata
+                    metadata = self._get_file_metadata(full_path)
+                    if not metadata:
+                        results.append({
+                            "filename": filename,
+                            "file_path": file_path,
+                            "error": "Could not get file metadata"
+                        })
+                        continue
+                    
+                    content_sample = ""
+                    if metadata.extractable:
+                        content = self._extract_content(full_path)
+                        if content and content.text:
+                            content_sample = content.text.strip()[:2000]
+                            
+                    # No content
+                    if not content_sample:
+                        results.append({
+                            "filename": filename,
+                            "file_path": file_path,
+                            "label": "không có nội dung"
+                        })
+                        continue
+                    
+                    # Embed content and compare with category embeddings
+                    text_embedding = self.search_engine.get_embedding(content_sample)
+                    category_scores: Dict[str, float] = {}
+
+                    for category, category_embedding in category_embeddings.items():
+                        similarity = cosine_similarity([text_embedding], [category_embedding])[0][0]
+                        category_scores[category] = float(similarity)
+
+                    best_category = max(category_scores, key=lambda k: category_scores[k])
+                    best_score = category_scores[best_category]
+
+                    # Apply fallback rule if confidence is too low
+                    final_label = best_category if best_score >= CLASSIFICATION_MIN_SCORE_THRESHOLD else "khác"
+                    
+                    # Prepare result
+                    result = {
+                        "filename": filename,
+                        "file_path": file_path,
+                        "label": final_label,
+                    }
+                    
+                    results.append(result)
+                
+                return {
+                    "success": True,
+                    "results": results,
+                    "total_files": len(file_paths),
+                    "categories_used": CATEGORIES,
+                }
+                
+            except Exception as e:
+                logger.exception(f"Classification failed for files: {file_paths}")
+                return {
+                    "success": False,
+                    "error": f"Classification failed: {str(e)}",
+                    "results": results
+                }
         
         @mcp.tool()
         def rebuild_search_index(
@@ -776,7 +1076,7 @@ class FilesystemServer:
             content_type: Optional[str] = None
         ) -> Dict[str, Any]:
             """
-            List files and directories in the given path.
+            Basic file operation: List all files and directories in the given path.
             
             Args:
                 path: Relative path from root directory
@@ -854,7 +1154,7 @@ class FilesystemServer:
             max_size: int = 10 * 1024 * 1024  # 10MB limit
         ) -> Dict[str, Any]:
             """
-            Read the contents of a file.
+            Basic file operation: Read the contents of a file.
             
             Args:
                 path: Relative path from root directory
@@ -916,7 +1216,7 @@ class FilesystemServer:
             create_dirs: bool = True
         ) -> Dict[str, Any]:
             """
-            Write content to a file.
+            Basic file operation: Write content to a file.
             
             Args:
                 path: Relative path from root directory
@@ -964,169 +1264,12 @@ class FilesystemServer:
                 return {"error": f"Failed to write file: {str(e)}"}
     
         @mcp.tool()
-        def search_files(
-            query: str,
-            search_type: str = "hybrid",
-            path: str = "",
-            file_extensions: Optional[List[str]] = None,
-            modified_after: Optional[str] = None,
-            modified_before: Optional[str] = None,
-            max_results: int = 20
-        ) -> Dict[str, Any]:
-            """
-            Search for files using various methods.
-            
-            Args:
-                query: Search query (filename, content, or semantic)
-                search_type: Type of search (filename, content, semantic, hybrid)
-                path: Limit search to specific path
-                file_extensions: Filter by file extensions
-                modified_after: ISO format date string
-                modified_before: ISO format date string
-                max_results: Maximum number of results
-            
-            Returns:
-                Dictionary with search results
-            """
-            if not self._is_safe_path(path):
-                return {"error": "Path is outside root directory"}
-            
-            search_path = os.path.join(self.root_path, path)
-            results = []
-            
-            try:
-                # Parse date filters
-                after_date = None
-                before_date = None
-                if modified_after:
-                    after_date = datetime.fromisoformat(modified_after)
-                if modified_before:
-                    before_date = datetime.fromisoformat(modified_before)
-                
-                if search_type in ["filename", "hybrid"]:
-                    # Filename search
-                    for root, dirs, files in os.walk(search_path):
-                        dirs[:] = [d for d in dirs if not self._is_ignored(os.path.join(root, d))]
-                        
-                        for file in files:
-                            full_path = os.path.join(root, file)
-                            
-                            if self._is_ignored(full_path):
-                                continue
-                            
-                            # Apply filters
-                            if file_extensions and not any(file.lower().endswith(ext.lower()) for ext in file_extensions):
-                                continue
-                            
-                            metadata = self._get_file_metadata(full_path)
-                            if not metadata:
-                                continue
-                            
-                            if after_date and metadata.modified < after_date:
-                                continue
-                            if before_date and metadata.modified > before_date:
-                                continue
-                            
-                            # Check if query matches filename
-                            if query.lower() in file.lower():
-                                results.append({
-                                    "file_path": metadata.path,
-                                    "match_type": "filename",
-                                    "match_score": 1.0,
-                                    "metadata": metadata.__dict__
-                                })
-                
-                if search_type in ["content", "hybrid"]:
-                    # Content search (simple text matching)
-                    for root, dirs, files in os.walk(search_path):
-                        dirs[:] = [d for d in dirs if not self._is_ignored(os.path.join(root, d))]
-                        
-                        for file in files:
-                            full_path = os.path.join(root, file)
-                            
-                            if self._is_ignored(full_path):
-                                continue
-                            
-                            metadata = self._get_file_metadata(full_path)
-                            if not metadata or not metadata.extractable:
-                                continue
-                            
-                            # Apply filters
-                            if file_extensions and not any(file.lower().endswith(ext.lower()) for ext in file_extensions):
-                                continue
-                            
-                            if after_date and metadata.modified < after_date:
-                                continue
-                            if before_date and metadata.modified > before_date:
-                                continue
-                            
-                            # Extract and search content
-                            content = self._extract_content(full_path)
-                            if content and query.lower() in content.text.lower():
-                                results.append({
-                                    "file_path": metadata.path,
-                                    "match_type": "content",
-                                    "match_score": 0.8,
-                                    "metadata": metadata.__dict__,
-                                    "content_snippet": self._extract_snippet(content.text, query)
-                                })
-                
-                if search_type in ["semantic", "hybrid"]:
-                    # Semantic search
-                    semantic_results = self.search_engine.search(query, max_results, 0.1)
-                    
-                    for result in semantic_results:
-                        file_path = result["file_path"]
-                        full_path = os.path.join(self.root_path, file_path)
-                        
-                        # Apply filters
-                        if file_extensions and not any(file_path.lower().endswith(ext.lower()) for ext in file_extensions):
-                            continue
-                        
-                        metadata = self._get_file_metadata(full_path)
-                        if not metadata:
-                            continue
-                        
-                        if after_date and metadata.modified < after_date:
-                            continue
-                        if before_date and metadata.modified > before_date:
-                            continue
-                        
-                        results.append({
-                            "file_path": file_path,
-                            "match_type": "semantic",
-                            "match_score": result["similarity"],
-                            "metadata": metadata.__dict__,
-                            "content_snippet": self._extract_snippet(result["content"], query)
-                        })
-                
-                # Remove duplicates and sort by score
-                seen_files = set()
-                unique_results = []
-                for result in results:
-                    if result["file_path"] not in seen_files:
-                        seen_files.add(result["file_path"])
-                        unique_results.append(result)
-                
-                unique_results.sort(key=lambda x: x["match_score"], reverse=True)
-                
-                return {
-                    "query": query,
-                    "search_type": search_type,
-                    "results": unique_results[:max_results],
-                    "total_results": len(unique_results)
-                }
-                
-            except Exception as e:
-                return {"error": f"Search failed: {str(e)}"}
-    
-        @mcp.tool()
         def get_file_info(
             path: str,
             include_content_analysis: bool = False
         ) -> Dict[str, Any]:
             """
-            Get detailed information about a file.
+            Basic file operation: Get detailed information about a file.
             
             Args:
                 path: Relative path from root directory
@@ -1166,34 +1309,34 @@ class FilesystemServer:
             return result
 
     def _register_resources(self):
-        """Register MCP resources"""
-        
-        @mcp.resource("file://{path}")
-        def get_file_resource(path: str) -> str:
-            """Get file content as a resource"""
-            if not self._is_safe_path(path):
-                return "Error: Path is outside root directory"
+            """Register MCP resources"""
             
-            full_path = os.path.join(self.root_path, path)
-            
-            if not os.path.exists(full_path):
-                return "Error: File not found"
-            
-            metadata = self._get_file_metadata(full_path)
-            if not metadata:
-                return "Error: Could not get file metadata"
-            
-            if metadata.extractable:
-                content = self._extract_content(full_path)
-                if content:
-                    return content.text
-            
-            # Try to read as plain text
-            try:
-                with open(full_path, 'r', encoding='utf-8') as f:
-                    return f.read()
-            except:
-                return "Error: Could not read file content"
+            @mcp.resource("file://{path}")
+            def get_file_resource(path: str) -> str:
+                """Get file content as a resource"""
+                if not self._is_safe_path(path):
+                    return "Error: Path is outside root directory"
+                
+                full_path = os.path.join(self.root_path, path)
+                
+                if not os.path.exists(full_path):
+                    return "Error: File not found"
+                
+                metadata = self._get_file_metadata(full_path)
+                if not metadata:
+                    return "Error: Could not get file metadata"
+                
+                if metadata.extractable:
+                    content = self._extract_content(full_path)
+                    if content:
+                        return content.text
+                
+                # Try to read as plain text
+                try:
+                    with open(full_path, 'r', encoding='utf-8') as f:
+                        return f.read()
+                except:
+                    return "Error: Could not read file content"
 
     def _register_prompts(self):
         """Register MCP prompts"""
@@ -1290,10 +1433,7 @@ def main():
     
     try:        
         # Initialize the server
-        server = FilesystemServer(args.root_path, args.ignore)
-
-        if args.rebuild_index:
-            server._build_search_index()
+        server = FilesystemServer(args.root_path, args.ignore, rebuild_index=args.rebuild_index)
             
         print(f"Starting FastMCP Semantic Filesystem Server on {args.root_path}")
         mcp.run()

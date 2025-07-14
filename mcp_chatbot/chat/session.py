@@ -15,24 +15,23 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-SYSTEM_MESSAGE = """You are a helpful assistant with access to the following tools:
+SYSTEM_MESSAGE = """
+You are a helpful assistant with access to the following tools:
 
 {tools_description}
 
 Tool Usage Guidelines:
-- Choose the most appropriate tool based on the user's question.
+- Choose the most appropriate tool(s) based on the user's question.
 - If no tool is needed, reply directly.
+- Use only the tools explicitly defined above.
 
-For document-related questions that involve searching:
-1. Use `semantic_search` to find the most relevant documents.
-2. Use `extract_document_content` on the top results to retrieve full content.
-3. Use that content to synthesize a complete and helpful answer.
-→ Avoid using `search_files` unless you're searching for exact filenames or literal string matches.
+When using tools:
+1. Use **only one tool call at a time**, and wait for its response before continuing.
+2. If the user query requires **multiple steps or tools**, handle them sequentially in the correct order.
+3. After receiving a tool response, always **re-evaluate the original user request** and determine if further tool use is needed.
+4. Do not repeat the same tool call unless something was missing or unclear.
 
-Use only the tools explicitly defined above.
-
-IMPORTANT: When you need to use a tool, you must respond with
-the exact JSON object format below:
+IMPORTANT: When you need to use a tool, respond using the exact JSON object format below:
 {{
     "tool": "tool-name",
     "arguments": {{
@@ -40,22 +39,49 @@ the exact JSON object format below:
     }}
 }}
 
-After receiving tool responses:
-1. Provide a clear, natural-language answer based on the data.
-2. Be concise but informative.
-3. Focus on the user's intent.
-4. Avoid simply repeating raw tool output.
+After receiving a tool's response:
+- Always reference both the tool output **and** the original user request.
+- If further action is needed, continue using tools as needed.
+- Finish with a **natural, clear explanation** tailored to the user's original question.
 
-Example:
-User: What does the project plan say about Q4 milestones?
+---
+
+### Example
+
+User: Tìm các báo cáo tài chính năm 2025, sau đó phân loại các file vừa tìm được.
+
 Assistant:
 {{
-    "tool": "semantic_search",
+    "tool": "search_files",
     "arguments": {{
-        "query": "Q4 milestones project plan"
+        "query": "báo cáo tài chính năm 2025",
+        "search_type": "hybrid"
     }}
 }}
+
+--- Tool returns file list ---
+
+Assistant:
+Tôi đã tìm thấy các file tài chính liên quan đến năm 2025. Bây giờ tôi sẽ phân loại các file này dựa trên nội dung của chúng.
+
+{{
+    "tool": "classify_files",
+    "arguments": {{
+        "files": ["bao_cao_2025_q1.pdf", "du_bao_2025.md"]
+    }}
+}}
+
+--- Tool returns classification ---
+
+Assistant:
+Dưới đây là phân loại của các tài liệu tìm được:
+
+- **Báo cáo tài chính**: bao_cao_2025_q1.pdf
+- **Dự báo**: du_bao_2025.md
+
+Bạn có muốn tôi tóm tắt các tài liệu theo từng nhóm không?
 """
+
 
 @dataclass
 class ToolCall:

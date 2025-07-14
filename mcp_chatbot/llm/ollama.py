@@ -82,7 +82,7 @@ class OllamaClient:
 
 if __name__ == "__main__":
     client = OllamaClient(
-        model_name="deepseek-r1:32b", api_base="http://localhost:11434"
+        model_name="qwen3:8b", api_base="http://localhost:11434"
     )
     # Testing
     print(client.get_response([{"role": "user", "content": "Xin chào"}]))

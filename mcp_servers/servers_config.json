@@ -7,8 +7,14 @@
         "E:\\HoangNgoc\\NewTechInSE\\chatbot\\mcp_servers",
         "run",
         "file_system.py",
-        "E:\\HoangNgoc\\NewTechInSE\\project3\\data"
-      ]
+        "E:\\HoangNgoc\\NewTechInSE\\project3\\data",
+        "--rebuild-index"
+      ],
+      "env": {
+        "MCP_LOG_LEVEL": "DEBUG",
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONIOENCODING": "utf-8"
+      }
     }
   }
 }
